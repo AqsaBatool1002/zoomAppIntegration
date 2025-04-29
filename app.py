@@ -33,6 +33,7 @@ user_id = None  # Added to store the user's Zoom ID
 @app.route("/")
 def home():
     """Home page with instructions and call initiation form"""
+    logger.info("Rendering the home page with authorization and call initiation form")
     html = """
     <!DOCTYPE html>
     <html>
@@ -88,7 +89,6 @@ def home():
 @app.route("/authorize")
 def authorize():
     """ Step 1: Redirect user to Zoom OAuth for Authorization """
-    # Changed from admin scopes to user scopes
     scopes = "phone:write phone:read"  # User-level scopes
     url = (
         f"{ZOOM_AUTH_URL}"
@@ -109,6 +109,7 @@ def callback():
         return "❌ Authorization code not found.", 400
     
     try:
+        logger.info("Exchanging authorization code for access token...")
         token_response = requests.post(
             ZOOM_TOKEN_URL,
             params={
@@ -132,8 +133,9 @@ def callback():
             logger.error("Access token not found in response")
             return "❌ Access token not found in response.", 500
         
-        # Get the user profile to retrieve the user ID - NEW ADDITION
+        # Get the user profile to retrieve the user ID
         try:
+            logger.info("Retrieving user profile from Zoom API...")
             user_response = requests.get(
                 f"{ZOOM_API_BASE_URL}/users/me",
                 headers={"Authorization": f"Bearer {access_token}"},
@@ -147,7 +149,6 @@ def callback():
             logger.error(f"Failed to get user profile: {str(e)}")
             return f"❌ Failed to get user profile: {str(e)}", 500
         
-        # In a production app, you would store these tokens securely
         logger.info(f"✅ Authorization successful. Token expires in {expires_in} seconds")
         
         # Return success page to user
@@ -171,14 +172,17 @@ def make_call():
     global access_token, user_id
     
     if not access_token:
+        logger.warning("Attempted to make a call without authorization")
         return "❌ Not authorized. Please authorize with Zoom first.", 401
     
     if not user_id:
+        logger.warning("User ID is missing, reauthorization is required")
         return "❌ User ID not available. Please re-authorize with Zoom.", 401
     
     extension = request.form.get("extension")
     
     if not extension:
+        logger.warning("No extension number provided")
         return "❌ Missing extension number.", 400
     
     # Prepare the request to Zoom API
@@ -205,11 +209,7 @@ def make_call():
     }
     
     try:
-        # Log the request details for debugging
-        logger.info(f"Making call to extension {extension}")
-        logger.info(f"API URL: {call_url}")
-        logger.info(f"Payload: {payload}")
-        
+        logger.info(f"Making call to extension {extension}...")
         response = requests.post(call_url, headers=headers, json=payload, timeout=10)
         
         # Log the response for debugging
