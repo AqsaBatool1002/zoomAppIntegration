@@ -18,15 +18,17 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configuration
-CLIENT_ID = os.environ.get("ZOOM_CLIENT_ID")
-CLIENT_SECRET = os.environ.get("ZOOM_CLIENT_SECRET")
-REDIRECT_URI = os.environ.get("ZOOM_REDIRECT_URI")
+CLIENT_ID = os.environ.get("ZOOM_CLIENT_ID", "EMBHBncrSteZR4jaEuQYCw")
+CLIENT_SECRET = os.environ.get("ZOOM_CLIENT_SECRET", "mP5oREtm9niCwCH98Vvt16v5xXa1V2XI")
+REDIRECT_URI = os.environ.get("ZOOM_REDIRECT_URI", "https://zygomorphic-maribeth-aqsabatool1002-821660b4.koyeb.app/callback")
 ZOOM_AUTH_URL = "https://zoom.us/oauth/authorize"
 ZOOM_TOKEN_URL = "https://zoom.us/oauth/token"
 ZOOM_API_BASE_URL = "https://api.zoom.us/v2"
 
-# Store the access token in memory (in production, use a database or secure storage)
+# Store the access token and user ID in memory
+# (in production, use a secure storage solution)
 access_token = None
+user_id = None  # Added to store the user's Zoom ID
 
 @app.route("/")
 def home():
@@ -68,20 +70,6 @@ def home():
                         <p class="note">Enter the extension you want to call (e.g., 804)</p>
                     </div>
                     
-                    <div>
-                        <label for="caller_number_type">Caller Number Type:</label>
-                        <select id="caller_number_type" name="caller_number_type">
-                            <option value="phone_number">Company Phone Number</option>
-                            <option value="extension_number">Extension Number</option>
-                        </select>
-                    </div>
-                    
-                    <div>
-                        <label for="caller_number">Caller Number or Extension:</label>
-                        <input type="text" id="caller_number" name="caller_number" required>
-                        <p class="note">Your phone number or extension that will be used to make the call</p>
-                    </div>
-                    
                     <button type="submit" class="btn">Initiate Call</button>
                 </form>
             </div>
@@ -89,7 +77,7 @@ def home():
             <div class="card">
                 <h2>Webhook Status</h2>
                 <p>Configure your Zoom webhook to point to:</p>
-                <code>https://your-koyeb-app-url.koyeb.app/webhook</code>
+                <code>https://zygomorphic-maribeth-aqsabatool1002-821660b4.koyeb.app/webhook</code>
             </div>
         </div>
     </body>
@@ -100,7 +88,8 @@ def home():
 @app.route("/authorize")
 def authorize():
     """ Step 1: Redirect user to Zoom OAuth for Authorization """
-    scopes = "phone:write:admin phone:read:admin"  # Add scopes needed for making calls
+    # Changed from admin scopes to user scopes
+    scopes = "phone:write phone:read"  # User-level scopes
     url = (
         f"{ZOOM_AUTH_URL}"
         f"?response_type=code"
@@ -134,7 +123,7 @@ def callback():
         token_response.raise_for_status()  # Raise exception for non-200 status codes
         
         token_data = token_response.json()
-        global access_token
+        global access_token, user_id
         access_token = token_data.get("access_token")
         refresh_token = token_data.get("refresh_token")
         expires_in = token_data.get("expires_in")
@@ -143,7 +132,22 @@ def callback():
             logger.error("Access token not found in response")
             return "❌ Access token not found in response.", 500
         
-        # In a production app, you would store these tokens in a database
+        # Get the user profile to retrieve the user ID - NEW ADDITION
+        try:
+            user_response = requests.get(
+                f"{ZOOM_API_BASE_URL}/users/me",
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10
+            )
+            user_response.raise_for_status()
+            user_data = user_response.json()
+            user_id = user_data.get("id")
+            logger.info(f"User ID: {user_id}")
+        except Exception as e:
+            logger.error(f"Failed to get user profile: {str(e)}")
+            return f"❌ Failed to get user profile: {str(e)}", 500
+        
+        # In a production app, you would store these tokens securely
         logger.info(f"✅ Authorization successful. Token expires in {expires_in} seconds")
         
         # Return success page to user
@@ -164,17 +168,18 @@ def callback():
 @app.route("/make-call", methods=["POST"])
 def make_call():
     """Initiate a call to the specified extension"""
-    global access_token
+    global access_token, user_id
     
     if not access_token:
         return "❌ Not authorized. Please authorize with Zoom first.", 401
     
-    extension = request.form.get("extension")
-    caller_number_type = request.form.get("caller_number_type")
-    caller_number = request.form.get("caller_number")
+    if not user_id:
+        return "❌ User ID not available. Please re-authorize with Zoom.", 401
     
-    if not extension or not caller_number:
-        return "❌ Missing required parameters.", 400
+    extension = request.form.get("extension")
+    
+    if not extension:
+        return "❌ Missing extension number.", 400
     
     # Prepare the request to Zoom API
     headers = {
@@ -182,25 +187,42 @@ def make_call():
         "Content-Type": "application/json"
     }
     
-    # API endpoint for initiating a call
-    call_url = f"{ZOOM_API_BASE_URL}/phone/call"
+    # Using the user-level call command API instead of admin-level API
+    call_url = f"{ZOOM_API_BASE_URL}/phone/users/{user_id}/call_command"
     
-    # Prepare the payload
+    # Different payload format for user-level API
     payload = {
-        "to_contact": {
-            "extension_number": extension  # Extension to call
-        },
-        "from_contact": {
-            caller_number_type: caller_number  # Your caller ID
-        }
+        "commands": [
+            {
+                "command": "call",
+                "params": {
+                    "callee": {
+                        "extension_number": extension  # Extension to call
+                    }
+                }
+            }
+        ]
     }
     
     try:
+        # Log the request details for debugging
+        logger.info(f"Making call to extension {extension}")
+        logger.info(f"API URL: {call_url}")
+        logger.info(f"Payload: {payload}")
+        
         response = requests.post(call_url, headers=headers, json=payload, timeout=10)
-        response_data = response.json()
+        
+        # Log the response for debugging
+        try:
+            response_data = response.json()
+        except:
+            response_data = response.text
+            
+        logger.info(f"Response status code: {response.status_code}")
+        logger.info(f"Response data: {response_data}")
         
         if response.status_code == 201 or response.status_code == 200:
-            logger.info(f"✅ Call initiated successfully: {response_data}")
+            logger.info(f"✅ Call initiated successfully to extension {extension}")
             return """
             <html>
                 <body style="font-family: Arial, sans-serif; text-align: center; margin-top: 50px;">
@@ -211,13 +233,17 @@ def make_call():
             </html>
             """
         else:
-            logger.error(f"❌ Failed to initiate call: {response_data}")
-            error_message = response_data.get("message", "Unknown error")
+            error_message = "Unknown error"
+            if isinstance(response_data, dict):
+                error_message = response_data.get("message", "Unknown error")
+            
+            logger.error(f"❌ Failed to initiate call: {error_message}")
             return f"""
             <html>
                 <body style="font-family: Arial, sans-serif; text-align: center; margin-top: 50px;">
                     <h1>❌ Call Failed</h1>
                     <p>Error: {error_message}</p>
+                    <p>Status Code: {response.status_code}</p>
                     <p><a href="/" style="color: #2D8CFF; text-decoration: none;">Return to Home</a></p>
                 </body>
             </html>
@@ -237,6 +263,7 @@ def webhook():
     try:
         data = request.json
         logger.info("🚨 Call Webhook Received 🚨")
+        logger.info(f"Full webhook data: {data}")
         
         # Extract important info from the webhook payload
         event_type = data.get("event")
@@ -272,7 +299,12 @@ def health_check():
     """Simple health check endpoint"""
     return jsonify({"status": "healthy"}), 200
 
-# In Koyeb, port is provided via PORT environment variable
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 3000))
-    app.run(host='0.0.0.0', port=port)
+    debug = os.environ.get("FLASK_ENV") == "development"
+    
+    logger.info(f"Starting Zoom Phone Integration server on port {port}")
+    logger.info(f"Debug mode: {debug}")
+    
+    # In production, you would use a proper WSGI server like Gunicorn
+    app.run(host='0.0.0.0', port=port, debug=debug)
